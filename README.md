@@ -10,7 +10,7 @@ brew install go
 ```
 
 ```shell
-go install github.com/mynameiswhm/granola2markdown
+go install github.com/mynameiswhm/granola2markdown@latest
 ```
 
 Make sure that your `$PATH` contains path to `GOBIN`:
