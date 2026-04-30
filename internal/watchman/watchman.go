@@ -61,6 +61,17 @@ type Manager struct {
 	binary   string
 }
 
+type InstallOptions struct {
+	OutputDir string
+	WatchRoot string
+	CachePath string
+}
+
+type UninstallOptions struct {
+	OutputDir string
+	WatchRoot string
+}
+
 type InstallResult struct {
 	TriggerName string
 	WatchRoot   string
@@ -100,24 +111,27 @@ func TriggerNameForOutputDir(outputDir string) (string, error) {
 	return deriveTriggerName(normalized), nil
 }
 
-func (m *Manager) Install(outputDir string, cachePath string) (InstallResult, error) {
+func (m *Manager) Install(options InstallOptions) (InstallResult, error) {
 	if err := m.ensureDependency(); err != nil {
 		return InstallResult{}, err
 	}
 
-	normalizedOutput, err := normalizeOutputDir(outputDir)
+	normalizedOutput, err := normalizeOutputDir(options.OutputDir)
+	if err != nil {
+		return InstallResult{}, err
+	}
+	watchRoot, err := normalizeWatchRoot(options.WatchRoot)
 	if err != nil {
 		return InstallResult{}, err
 	}
 
 	triggerName := deriveTriggerName(normalizedOutput)
-	watchRoot := filepath.Dir(cachePath)
 
 	if _, _, err := m.exec(m.binary, []string{"watch-project", watchRoot}, nil); err != nil {
 		return InstallResult{}, err
 	}
 
-	payload, err := buildInstallPayload(triggerName, watchRoot, normalizedOutput, cachePath)
+	payload, err := buildInstallPayload(triggerName, watchRoot, normalizedOutput, options.CachePath)
 	if err != nil {
 		return InstallResult{}, err
 	}
@@ -133,18 +147,21 @@ func (m *Manager) Install(outputDir string, cachePath string) (InstallResult, er
 	}, nil
 }
 
-func (m *Manager) Uninstall(outputDir string, cachePath string) (UninstallResult, error) {
+func (m *Manager) Uninstall(options UninstallOptions) (UninstallResult, error) {
 	if err := m.ensureDependency(); err != nil {
 		return UninstallResult{}, err
 	}
 
-	normalizedOutput, err := normalizeOutputDir(outputDir)
+	normalizedOutput, err := normalizeOutputDir(options.OutputDir)
+	if err != nil {
+		return UninstallResult{}, err
+	}
+	watchRoot, err := normalizeWatchRoot(options.WatchRoot)
 	if err != nil {
 		return UninstallResult{}, err
 	}
 
 	triggerName := deriveTriggerName(normalizedOutput)
-	watchRoot := filepath.Dir(cachePath)
 
 	stdout, stderr, err := m.run(m.binary, []string{"trigger-del", watchRoot, triggerName}, nil)
 	if err != nil {
@@ -211,6 +228,14 @@ func runCommand(name string, args []string, stdin []byte) (string, string, error
 	return stdoutBuf.String(), stderrBuf.String(), err
 }
 
+func normalizeWatchRoot(watchRoot string) (string, error) {
+	trimmed := strings.TrimSpace(watchRoot)
+	if trimmed == "" {
+		return "", errors.New("watch root is required")
+	}
+	return filepath.Clean(trimmed), nil
+}
+
 func normalizeOutputDir(outputDir string) (string, error) {
 	trimmed := strings.TrimSpace(outputDir)
 	if trimmed == "" {
@@ -229,13 +254,18 @@ func deriveTriggerName(normalizedOutputDir string) string {
 }
 
 func buildInstallPayload(triggerName string, watchRoot string, outputDir string, cachePath string) ([]byte, error) {
-	command := []string{"granola2markdown", "--cache-path", cachePath, outputDir}
+	command := []string{"granola2markdown"}
+	if strings.TrimSpace(cachePath) != "" {
+		command = append(command, "--cache-path", cachePath)
+	}
+	command = append(command, outputDir)
+
 	payload := []any{
 		"trigger",
 		watchRoot,
 		map[string]any{
 			"name":         triggerName,
-			"expression":   []any{"match", "cache-v3.json", "wholename"},
+			"expression":   buildCacheMatchExpression(cachePath),
 			"command":      command,
 			"append_files": false,
 		},
@@ -246,6 +276,13 @@ func buildInstallPayload(triggerName string, watchRoot string, outputDir string,
 		return nil, fmt.Errorf("marshal watchman trigger payload: %w", err)
 	}
 	return data, nil
+}
+
+func buildCacheMatchExpression(cachePath string) []any {
+	if strings.TrimSpace(cachePath) == "" {
+		return []any{"match", "cache-v*.json", "wholename"}
+	}
+	return []any{"match", filepath.Base(cachePath), "wholename"}
 }
 
 func missingTriggerError(stdout string, stderr string, err error) bool {

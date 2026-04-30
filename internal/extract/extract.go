@@ -7,23 +7,29 @@ import (
 	"github.com/mynameiswhm/granola2markdown/internal/model"
 )
 
-func ExtractContent(panel model.PanelData) model.ExtractedContent {
+func ExtractContent(panel model.PanelData, documentTitle string) model.ExtractedContent {
+	if markdownContent := strings.TrimSpace(panel.Markdown); markdownContent != "" {
+		heading := firstNonEmpty(documentTitle, firstMarkdownHeading(markdownContent))
+		return model.ExtractedContent{Markdown: markdownContent, FirstHeading: heading, Source: "markdown"}
+	}
+
 	structuredMarkdown, firstHeading := markdown.RenderStructuredDoc(panel.Content)
+	heading := firstNonEmpty(firstHeading, documentTitle)
 	if strings.TrimSpace(structuredMarkdown) != "" {
-		return model.ExtractedContent{Markdown: structuredMarkdown, FirstHeading: firstHeading, Source: "doc"}
+		return model.ExtractedContent{Markdown: structuredMarkdown, FirstHeading: heading, Source: "doc"}
 	}
 
 	htmlMarkdown := markdown.HTMLToMarkdown(panel.OriginalContent)
 	if strings.TrimSpace(htmlMarkdown) != "" {
-		return model.ExtractedContent{Markdown: htmlMarkdown, FirstHeading: firstHeading, Source: "html"}
+		return model.ExtractedContent{Markdown: htmlMarkdown, FirstHeading: heading, Source: "html"}
 	}
 
 	generated := GeneratedLinesToMarkdown(panel.GeneratedLines)
 	if strings.TrimSpace(generated) != "" {
-		return model.ExtractedContent{Markdown: generated, FirstHeading: firstHeading, Source: "generated_lines"}
+		return model.ExtractedContent{Markdown: generated, FirstHeading: heading, Source: "generated_lines"}
 	}
 
-	return model.ExtractedContent{Markdown: "", FirstHeading: firstHeading, Source: "empty"}
+	return model.ExtractedContent{Markdown: "", FirstHeading: heading, Source: "empty"}
 }
 
 func GeneratedLinesToMarkdown(lines []map[string]any) string {
@@ -40,4 +46,24 @@ func GeneratedLinesToMarkdown(lines []map[string]any) string {
 	}
 
 	return strings.TrimSpace(strings.Join(parts, "\n"))
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func firstMarkdownHeading(value string) string {
+	for _, line := range strings.Split(value, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || !strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		return strings.TrimSpace(strings.TrimLeft(trimmed, "#"))
+	}
+	return ""
 }

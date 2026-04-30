@@ -32,7 +32,10 @@ func TestInstallSequenceAndPayload(t *testing.T) {
 	)
 
 	cachePath := filepath.Join(string(filepath.Separator), "tmp", "granola", "cache-v3.json")
-	result, err := manager.Install("./notes", cachePath)
+	result, err := manager.Install(InstallOptions{
+		OutputDir: "./notes",
+		WatchRoot: filepath.Dir(cachePath),
+	})
 	if err != nil {
 		t.Fatalf("Install() error = %v", err)
 	}
@@ -69,6 +72,7 @@ func TestInstallSequenceAndPayload(t *testing.T) {
 	if !ok {
 		t.Fatalf("payload[2] is not an object: %#v", payload[2])
 	}
+	assertVersionAwareExpression(t, config["expression"])
 
 	commandRaw, ok := config["command"].([]any)
 	if !ok {
@@ -84,7 +88,7 @@ func TestInstallSequenceAndPayload(t *testing.T) {
 		t.Fatalf("filepath.Abs() error = %v", err)
 	}
 	expectedOutput = filepath.Clean(expectedOutput)
-	expectedCommand := []string{"granola2markdown", "--cache-path", cachePath, expectedOutput}
+	expectedCommand := []string{"granola2markdown", expectedOutput}
 	if strings.Join(command, "|") != strings.Join(expectedCommand, "|") {
 		t.Fatalf("trigger command mismatch: got %v want %v", command, expectedCommand)
 	}
@@ -109,7 +113,10 @@ func TestInstallMissingDependency(t *testing.T) {
 		},
 	)
 
-	_, err := manager.Install("./notes", "/tmp/granola/cache-v3.json")
+	_, err := manager.Install(InstallOptions{
+		OutputDir: "./notes",
+		WatchRoot: "/tmp/granola",
+	})
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -135,11 +142,18 @@ func TestInstallAndUninstallUseSameTriggerName(t *testing.T) {
 	)
 
 	cachePath := "/tmp/granola/cache-v3.json"
-	installRes, err := manager.Install("./notes", cachePath)
+	installRes, err := manager.Install(InstallOptions{
+		OutputDir: "./notes",
+		WatchRoot: filepath.Dir(cachePath),
+		CachePath: cachePath,
+	})
 	if err != nil {
 		t.Fatalf("Install() error = %v", err)
 	}
-	uninstallRes, err := manager.Uninstall("./notes", cachePath)
+	uninstallRes, err := manager.Uninstall(UninstallOptions{
+		OutputDir: "./notes",
+		WatchRoot: filepath.Dir(cachePath),
+	})
 	if err != nil {
 		t.Fatalf("Uninstall() error = %v", err)
 	}
@@ -169,11 +183,85 @@ func TestUninstallMissingTriggerIsIdempotent(t *testing.T) {
 		},
 	)
 
-	result, err := manager.Uninstall("./notes", "/tmp/granola/cache-v3.json")
+	result, err := manager.Uninstall(UninstallOptions{
+		OutputDir: "./notes",
+		WatchRoot: "/tmp/granola",
+	})
 	if err != nil {
 		t.Fatalf("Uninstall() unexpected error: %v", err)
 	}
 	if result.Removed {
 		t.Fatalf("expected Removed=false for missing trigger, got true")
+	}
+}
+
+func assertVersionAwareExpression(t *testing.T, expression any) {
+	t.Helper()
+
+	items, ok := expression.([]any)
+	if !ok {
+		t.Fatalf("expression is not an array: %#v", expression)
+	}
+	if len(items) != 3 {
+		t.Fatalf("unexpected expression length: got %d", len(items))
+	}
+	if items[0] != "match" || items[1] != "cache-v*.json" || items[2] != "wholename" {
+		t.Fatalf("unexpected expression clause: %#v", items)
+	}
+}
+
+func TestInstallPinsExplicitCacheOverride(t *testing.T) {
+	var calls []call
+	manager := NewManagerWithDeps(
+		func(file string) (string, error) {
+			return "/usr/local/bin/watchman", nil
+		},
+		func(name string, args []string, stdin []byte) (string, string, error) {
+			calls = append(calls, call{
+				name:  name,
+				args:  append([]string(nil), args...),
+				stdin: append([]byte(nil), stdin...),
+			})
+			return "", "", nil
+		},
+	)
+
+	cachePath := "/tmp/granola/cache-v7.json"
+	_, err := manager.Install(InstallOptions{
+		OutputDir: "./notes",
+		WatchRoot: filepath.Dir(cachePath),
+		CachePath: cachePath,
+	})
+	if err != nil {
+		t.Fatalf("Install() error = %v", err)
+	}
+
+	var payload []any
+	if err := json.Unmarshal(calls[1].stdin, &payload); err != nil {
+		t.Fatalf("invalid trigger payload JSON: %v", err)
+	}
+
+	config, ok := payload[2].(map[string]any)
+	if !ok {
+		t.Fatalf("payload[2] is not an object: %#v", payload[2])
+	}
+	expression, ok := config["expression"].([]any)
+	if !ok {
+		t.Fatalf("expression is not an array: %#v", config["expression"])
+	}
+	if len(expression) != 3 || expression[0] != "match" || expression[1] != "cache-v7.json" || expression[2] != "wholename" {
+		t.Fatalf("unexpected pinned expression: %#v", expression)
+	}
+
+	commandRaw, ok := config["command"].([]any)
+	if !ok {
+		t.Fatalf("command is not an array: %#v", config["command"])
+	}
+	command := make([]string, 0, len(commandRaw))
+	for _, item := range commandRaw {
+		command = append(command, item.(string))
+	}
+	if len(command) != 4 || command[0] != "granola2markdown" || command[1] != "--cache-path" || command[2] != cachePath {
+		t.Fatalf("unexpected pinned command: %#v", command)
 	}
 }

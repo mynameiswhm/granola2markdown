@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/mynameiswhm/granola2markdown/internal/app"
@@ -23,8 +24,8 @@ func run(args []string) int {
 }
 
 type watchmanManager interface {
-	Install(outputDir string, cachePath string) (watchman.InstallResult, error)
-	Uninstall(outputDir string, cachePath string) (watchman.UninstallResult, error)
+	Install(options watchman.InstallOptions) (watchman.InstallResult, error)
+	Uninstall(options watchman.UninstallOptions) (watchman.UninstallResult, error)
 }
 
 func runWithManager(args []string, manager watchmanManager, stdout io.Writer, stderr io.Writer) int {
@@ -38,12 +39,12 @@ func runExport(args []string, stdout io.Writer, stderr io.Writer) int {
 	fs := flag.NewFlagSet("granola2markdown", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 
-	cachePathFlag := fs.String("cache-path", "", "Override path to Granola cache-v3.json")
+	cachePathFlag := fs.String("cache-path", "", "Override path to Granola cache file (otherwise probe newest cache-v*.json)")
 	verbose := fs.Bool("verbose", false, "Show detailed export decisions")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "Usage: %s [--cache-path PATH] [--verbose] <output_dir>\n", fs.Name())
 		fmt.Fprintf(fs.Output(), "       %s watchman <install|uninstall> [--cache-path PATH] <output_dir>\n", fs.Name())
-		fmt.Fprintln(fs.Output(), "Export Granola meeting notes from cache-v3.json to Markdown files.")
+		fmt.Fprintln(fs.Output(), "Export Granola meeting notes from Granola cache files, preferring the newest cache-v*.json.")
 		fmt.Fprintln(fs.Output(), "Manage Watchman triggers for background note export.")
 		fs.PrintDefaults()
 	}
@@ -98,7 +99,7 @@ func runWatchman(args []string, manager watchmanManager, stdout io.Writer, stder
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "Usage: granola2markdown watchman <install|uninstall> [--cache-path PATH] <output_dir>")
 		fmt.Fprintln(fs.Output(), "Subcommands:")
-		fmt.Fprintln(fs.Output(), "  install    Configure Watchman trigger for cache-v3.json updates")
+		fmt.Fprintln(fs.Output(), "  install    Configure Watchman trigger for cache-v*.json updates")
 		fmt.Fprintln(fs.Output(), "  uninstall  Remove Watchman trigger for the provided output directory")
 	}
 
@@ -125,7 +126,7 @@ func runWatchman(args []string, manager watchmanManager, stdout io.Writer, stder
 func runWatchmanInstall(args []string, manager watchmanManager, stdout io.Writer, stderr io.Writer) int {
 	fs := flag.NewFlagSet("granola2markdown watchman install", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	cachePathFlag := fs.String("cache-path", "", "Override path to Granola cache-v3.json")
+	cachePathFlag := fs.String("cache-path", "", "Override path to Granola cache file (otherwise probe newest cache-v*.json)")
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "Usage: granola2markdown watchman install [--cache-path PATH] <output_dir>")
 		fs.PrintDefaults()
@@ -144,13 +145,26 @@ func runWatchmanInstall(args []string, manager watchmanManager, stdout io.Writer
 		return 2
 	}
 
-	cachePath, err := paths.ResolveCachePath(*cachePathFlag)
+	watchRoot, err := resolveWatchRoot(*cachePathFlag)
 	if err != nil {
-		fmt.Fprintf(stderr, "Fatal: cannot determine default cache path: %v\n", err)
+		fmt.Fprintf(stderr, "Fatal: cannot determine cache watch root: %v\n", err)
 		return 1
 	}
 
-	result, err := manager.Install(positional[0], cachePath)
+	options := watchman.InstallOptions{
+		OutputDir: positional[0],
+		WatchRoot: watchRoot,
+	}
+	if strings.TrimSpace(*cachePathFlag) != "" {
+		cachePath, err := paths.ResolveCachePath(*cachePathFlag)
+		if err != nil {
+			fmt.Fprintf(stderr, "Fatal: cannot determine cache path: %v\n", err)
+			return 1
+		}
+		options.CachePath = cachePath
+	}
+
+	result, err := manager.Install(options)
 	if err != nil {
 		if errors.Is(err, watchman.ErrDependencyMissing) {
 			fmt.Fprintln(stderr, "Fatal: watchman executable not found on PATH.")
@@ -172,7 +186,7 @@ func runWatchmanInstall(args []string, manager watchmanManager, stdout io.Writer
 func runWatchmanUninstall(args []string, manager watchmanManager, stdout io.Writer, stderr io.Writer) int {
 	fs := flag.NewFlagSet("granola2markdown watchman uninstall", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	cachePathFlag := fs.String("cache-path", "", "Override path to Granola cache-v3.json")
+	cachePathFlag := fs.String("cache-path", "", "Override path to Granola cache file (otherwise probe newest cache-v*.json)")
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "Usage: granola2markdown watchman uninstall [--cache-path PATH] <output_dir>")
 		fs.PrintDefaults()
@@ -191,13 +205,16 @@ func runWatchmanUninstall(args []string, manager watchmanManager, stdout io.Writ
 		return 2
 	}
 
-	cachePath, err := paths.ResolveCachePath(*cachePathFlag)
+	watchRoot, err := resolveWatchRoot(*cachePathFlag)
 	if err != nil {
-		fmt.Fprintf(stderr, "Fatal: cannot determine default cache path: %v\n", err)
+		fmt.Fprintf(stderr, "Fatal: cannot determine cache watch root: %v\n", err)
 		return 1
 	}
 
-	result, err := manager.Uninstall(positional[0], cachePath)
+	result, err := manager.Uninstall(watchman.UninstallOptions{
+		OutputDir: positional[0],
+		WatchRoot: watchRoot,
+	})
 	if err != nil {
 		if errors.Is(err, watchman.ErrDependencyMissing) {
 			fmt.Fprintln(stderr, "Fatal: watchman executable not found on PATH.")
@@ -222,4 +239,12 @@ func runWatchmanUninstall(args []string, manager watchmanManager, stdout io.Writ
 		fmt.Fprintf(stdout, "  output dir: %s\n", result.OutputDir)
 	}
 	return 0
+}
+
+func resolveWatchRoot(cachePathOverride string) (string, error) {
+	cachePath, err := paths.ResolveCachePath(cachePathOverride)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Dir(cachePath), nil
 }

@@ -4,6 +4,7 @@ type DocumentData struct {
 	ID        string
 	CreatedAt string
 	DeletedAt string
+	Title     string
 }
 
 type PanelData struct {
@@ -11,6 +12,7 @@ type PanelData struct {
 	DocumentID       string
 	Title            string
 	TemplateSlug     string
+	Markdown         string
 	Content          map[string]any
 	OriginalContent  string
 	GeneratedLines   []map[string]any
@@ -22,6 +24,7 @@ type PanelData struct {
 type NoteCandidate struct {
 	Document DocumentData
 	Panel    PanelData
+	Strategy string
 }
 
 type ExtractedContent struct {
@@ -40,4 +43,5 @@ type ExportCounts struct {
 type ExistingRecord struct {
 	Path             string
 	GranolaUpdatedAt string
+	ContentSource    string
 }

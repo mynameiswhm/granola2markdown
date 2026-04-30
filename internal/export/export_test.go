@@ -3,6 +3,7 @@ package export
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/mynameiswhm/granola2markdown/internal/model"
@@ -33,6 +34,7 @@ func makeCandidate(documentID string, panelID string, createdAt string, contentU
 				},
 			},
 		},
+		Strategy: "cache",
 	}
 }
 
@@ -90,6 +92,12 @@ func TestDedupSkipAndUpdate(t *testing.T) {
 	}
 	if metadata[FieldDate] != "[[2026-02-13]]" {
 		t.Fatalf("unexpected date: %q", metadata[FieldDate])
+	}
+	if metadata[FieldStrategy] != "cache" {
+		t.Fatalf("unexpected strategy: %q", metadata[FieldStrategy])
+	}
+	if metadata[FieldContentSource] != "doc" {
+		t.Fatalf("unexpected content source: %q", metadata[FieldContentSource])
 	}
 	if _, ok := metadata["granola_panel_id"]; ok {
 		t.Fatalf("legacy panel id should not be present")
@@ -200,5 +208,290 @@ func TestMarkdownDatePropertyInvalidTimestampUsesUnknownDate(t *testing.T) {
 	date := MarkdownDateProperty("not-a-timestamp")
 	if date != "[[unknown-date]]" {
 		t.Fatalf("unexpected date property: %s", date)
+	}
+}
+
+func TestScanExistingIndexesDocumentEvenWithoutUpdatedAt(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "unknown-date-note.md")
+	err := WriteMarkdown(path, map[string]string{
+		FieldDocumentID: "doc-1",
+		FieldUpdatedAt:  "",
+		FieldDate:       "[[unknown-date]]",
+	}, "body")
+	if err != nil {
+		t.Fatalf("WriteMarkdown failed: %v", err)
+	}
+
+	index, err := ScanExisting(dir)
+	if err != nil {
+		t.Fatalf("ScanExisting failed: %v", err)
+	}
+	record, ok := index.ByDocument["doc-1"]
+	if !ok {
+		t.Fatalf("expected doc-1 to be indexed by document")
+	}
+	if record.Path != path {
+		t.Fatalf("unexpected path: %q", record.Path)
+	}
+	if len(index.ByExact) != 0 {
+		t.Fatalf("expected no exact index entries, got %d", len(index.ByExact))
+	}
+}
+
+func TestExportRenamesUnknownDateFileWhenCreatedAtBecomesKnown(t *testing.T) {
+	dir := t.TempDir()
+	oldPath := filepath.Join(dir, "unknown-date-old-meeting.md")
+	err := WriteMarkdown(oldPath, map[string]string{
+		FieldDocumentID: "doc-1",
+		FieldUpdatedAt:  "",
+		FieldDate:       "[[unknown-date]]",
+	}, "old body")
+	if err != nil {
+		t.Fatalf("WriteMarkdown failed: %v", err)
+	}
+
+	candidate := makeCandidate("doc-1", "panel-1", "2026-02-12T09:00:12.254Z", "2026-02-12T10:17:24.176Z", "Old Meeting")
+	counts, err := ExportCandidates([]model.NoteCandidate{candidate}, dir, false)
+	if err != nil {
+		t.Fatalf("ExportCandidates failed: %v", err)
+	}
+	if counts.Updated != 1 {
+		t.Fatalf("expected one updated note, got %+v", counts)
+	}
+
+	newPath := filepath.Join(dir, "2026-02-12-old-meeting.md")
+	if _, err := os.Stat(newPath); err != nil {
+		t.Fatalf("expected renamed file at %s: %v", newPath, err)
+	}
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("expected old path to be removed, stat err=%v", err)
+	}
+}
+
+func TestExportRenamesUntitledFileWhenHeadingBecomesKnown(t *testing.T) {
+	dir := t.TempDir()
+	oldPath := filepath.Join(dir, "2026-04-27-untitled.md")
+	err := WriteMarkdown(oldPath, map[string]string{
+		FieldDocumentID:    "doc-1",
+		FieldUpdatedAt:     "2026-04-27T10:00:00.000Z",
+		FieldDate:          "[[2026-04-27]]",
+		FieldContentSource: "doc",
+		FieldStrategy:      "cache",
+	}, "old body")
+	if err != nil {
+		t.Fatalf("WriteMarkdown failed: %v", err)
+	}
+
+	candidate := makeCandidate("doc-1", "panel-1", "2026-04-27T09:00:00.000Z", "2026-04-27T11:00:00.000Z", "Final Title")
+	candidate.Strategy = "cache"
+
+	counts, err := ExportCandidates([]model.NoteCandidate{candidate}, dir, false)
+	if err != nil {
+		t.Fatalf("ExportCandidates failed: %v", err)
+	}
+	if counts.Updated != 1 {
+		t.Fatalf("expected one updated note, got %+v", counts)
+	}
+
+	newPath := filepath.Join(dir, "2026-04-27-final-title.md")
+	if _, err := os.Stat(newPath); err != nil {
+		t.Fatalf("expected renamed file at %s: %v", newPath, err)
+	}
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("expected old path to be removed, stat err=%v", err)
+	}
+
+	data, err := os.ReadFile(newPath)
+	if err != nil {
+		t.Fatalf("read markdown failed: %v", err)
+	}
+	metadata := ParseFrontMatter(string(data))
+	if metadata[FieldUpdatedAt] != "2026-04-27T11:00:00.000Z" {
+		t.Fatalf("unexpected updated_at: %q", metadata[FieldUpdatedAt])
+	}
+	if metadata[FieldStrategy] != "cache" {
+		t.Fatalf("expected updated strategy, got %q", metadata[FieldStrategy])
+	}
+}
+
+func TestExportRenamesUntitledFileWithCollisionSuffix(t *testing.T) {
+	dir := t.TempDir()
+	oldPath := filepath.Join(dir, "2026-04-27-untitled.md")
+	err := WriteMarkdown(oldPath, map[string]string{
+		FieldDocumentID:    "doc-1",
+		FieldUpdatedAt:     "2026-04-27T10:00:00.000Z",
+		FieldDate:          "[[2026-04-27]]",
+		FieldContentSource: "doc",
+	}, "old body")
+	if err != nil {
+		t.Fatalf("WriteMarkdown failed: %v", err)
+	}
+
+	collisionPath := filepath.Join(dir, "2026-04-27-final-title.md")
+	err = WriteMarkdown(collisionPath, map[string]string{
+		FieldDocumentID: "doc-2",
+		FieldUpdatedAt:  "2026-04-27T09:00:00.000Z",
+		FieldDate:       "[[2026-04-27]]",
+	}, "other body")
+	if err != nil {
+		t.Fatalf("WriteMarkdown failed: %v", err)
+	}
+
+	candidate := makeCandidate("doc-1", "panel-1", "2026-04-27T09:00:00.000Z", "2026-04-27T11:00:00.000Z", "Final Title")
+
+	counts, err := ExportCandidates([]model.NoteCandidate{candidate}, dir, false)
+	if err != nil {
+		t.Fatalf("ExportCandidates failed: %v", err)
+	}
+	if counts.Updated != 1 {
+		t.Fatalf("expected one updated note, got %+v", counts)
+	}
+
+	renamedPath := filepath.Join(dir, "2026-04-27-final-title-2.md")
+	if _, err := os.Stat(renamedPath); err != nil {
+		t.Fatalf("expected collision-safe renamed file at %s: %v", renamedPath, err)
+	}
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("expected old path to be removed, stat err=%v", err)
+	}
+}
+
+func TestExportUpgradesGeneratedLinesNoteToMarkdown(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "2026-04-27-upgrade-me.md")
+	err := WriteMarkdown(path, map[string]string{
+		FieldDocumentID:    "doc-1",
+		FieldUpdatedAt:     "2026-04-27T10:00:00.000Z",
+		FieldDate:          "[[2026-04-27]]",
+		FieldContentSource: "generated_lines",
+		FieldStrategy:      "cache",
+	}, "old generated body")
+	if err != nil {
+		t.Fatalf("WriteMarkdown failed: %v", err)
+	}
+
+	candidate := makeCandidate("doc-1", "panel-1", "2026-04-27T09:00:00.000Z", "2026-04-27T10:00:00.000Z", "Doc Title")
+	candidate.Panel.Markdown = "### Better markdown\n\nBody"
+	candidate.Panel.Content = nil
+	candidate.Panel.OriginalContent = ""
+	candidate.Panel.GeneratedLines = nil
+	candidate.Strategy = "cache"
+
+	counts, err := ExportCandidates([]model.NoteCandidate{candidate}, dir, false)
+	if err != nil {
+		t.Fatalf("ExportCandidates failed: %v", err)
+	}
+	if counts.Updated != 1 {
+		t.Fatalf("expected one updated note, got %+v", counts)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read markdown failed: %v", err)
+	}
+	metadata := ParseFrontMatter(string(data))
+	if metadata[FieldContentSource] != "markdown" {
+		t.Fatalf("expected upgraded content source markdown, got %q", metadata[FieldContentSource])
+	}
+	if metadata[FieldStrategy] != "cache" {
+		t.Fatalf("expected cache strategy, got %q", metadata[FieldStrategy])
+	}
+	if !strings.Contains(string(data), "### Better markdown") {
+		t.Fatalf("expected markdown body to be replaced")
+	}
+}
+
+func TestExportNeverTouchesExistingMarkdownNote(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "2026-04-27-locked.md")
+	err := WriteMarkdown(path, map[string]string{
+		FieldDocumentID:    "doc-1",
+		FieldUpdatedAt:     "2026-04-27T10:00:00.000Z",
+		FieldDate:          "[[2026-04-27]]",
+		FieldContentSource: "markdown",
+		FieldStrategy:      "cache",
+	}, "locked markdown body")
+	if err != nil {
+		t.Fatalf("WriteMarkdown failed: %v", err)
+	}
+
+	candidate := makeCandidate("doc-1", "panel-1", "2026-04-27T09:00:00.000Z", "2026-04-27T11:00:00.000Z", "Doc Title")
+	candidate.Strategy = "cache"
+
+	counts, err := ExportCandidates([]model.NoteCandidate{candidate}, dir, false)
+	if err != nil {
+		t.Fatalf("ExportCandidates failed: %v", err)
+	}
+	if counts.Skipped != 1 {
+		t.Fatalf("expected one skipped note, got %+v", counts)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read markdown failed: %v", err)
+	}
+	metadata := ParseFrontMatter(string(data))
+	if metadata[FieldContentSource] != "markdown" {
+		t.Fatalf("expected markdown content source to remain locked, got %q", metadata[FieldContentSource])
+	}
+	if metadata[FieldStrategy] != "cache" {
+		t.Fatalf("expected original strategy to remain unchanged, got %q", metadata[FieldStrategy])
+	}
+	if !strings.Contains(string(data), "locked markdown body") {
+		t.Fatalf("expected locked markdown body to remain unchanged")
+	}
+}
+
+func TestExportRenamesExistingMarkdownUntitledNoteWhenTitleBecomesKnown(t *testing.T) {
+	dir := t.TempDir()
+	oldPath := filepath.Join(dir, "2026-04-27-untitled.md")
+	err := WriteMarkdown(oldPath, map[string]string{
+		FieldDocumentID:    "doc-1",
+		FieldUpdatedAt:     "2026-04-27T10:00:00.000Z",
+		FieldDate:          "[[2026-04-27]]",
+		FieldContentSource: "markdown",
+		FieldStrategy:      "cache",
+	}, "locked markdown body")
+	if err != nil {
+		t.Fatalf("WriteMarkdown failed: %v", err)
+	}
+
+	candidate := makeCandidate("doc-1", "panel-1", "2026-04-27T09:00:00.000Z", "2026-04-27T11:00:00.000Z", "Doc Title")
+	candidate.Panel.Markdown = "### Doc Title\n\nBetter markdown"
+	candidate.Panel.Content = nil
+	candidate.Panel.OriginalContent = ""
+	candidate.Panel.GeneratedLines = nil
+	candidate.Strategy = "cache"
+
+	counts, err := ExportCandidates([]model.NoteCandidate{candidate}, dir, false)
+	if err != nil {
+		t.Fatalf("ExportCandidates failed: %v", err)
+	}
+	if counts.Updated != 1 {
+		t.Fatalf("expected one updated note, got %+v", counts)
+	}
+
+	newPath := filepath.Join(dir, "2026-04-27-doc-title.md")
+	if _, err := os.Stat(newPath); err != nil {
+		t.Fatalf("expected renamed file at %s: %v", newPath, err)
+	}
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("expected old path to be removed, stat err=%v", err)
+	}
+
+	data, err := os.ReadFile(newPath)
+	if err != nil {
+		t.Fatalf("read markdown failed: %v", err)
+	}
+	metadata := ParseFrontMatter(string(data))
+	if metadata[FieldContentSource] != "markdown" {
+		t.Fatalf("expected markdown content source to remain markdown, got %q", metadata[FieldContentSource])
+	}
+	if metadata[FieldStrategy] != "cache" {
+		t.Fatalf("expected strategy to update during rename, got %q", metadata[FieldStrategy])
+	}
+	if !strings.Contains(string(data), "### Doc Title") {
+		t.Fatalf("expected markdown body to be refreshed during rename")
 	}
 }

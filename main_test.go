@@ -14,16 +14,20 @@ type fakeWatchmanManager struct {
 	uninstallResult watchman.UninstallResult
 	installErr      error
 	uninstallErr    error
+	lastInstall     watchman.InstallOptions
+	lastUninstall   watchman.UninstallOptions
 }
 
-func (f fakeWatchmanManager) Install(outputDir string, cachePath string) (watchman.InstallResult, error) {
+func (f *fakeWatchmanManager) Install(options watchman.InstallOptions) (watchman.InstallResult, error) {
+	f.lastInstall = options
 	if f.installResult.TriggerName == "" {
 		f.installResult.TriggerName = "granola2markdown-test"
 	}
 	return f.installResult, f.installErr
 }
 
-func (f fakeWatchmanManager) Uninstall(outputDir string, cachePath string) (watchman.UninstallResult, error) {
+func (f *fakeWatchmanManager) Uninstall(options watchman.UninstallOptions) (watchman.UninstallResult, error) {
+	f.lastUninstall = options
 	if f.uninstallResult.TriggerName == "" {
 		f.uninstallResult.TriggerName = "granola2markdown-test"
 	}
@@ -33,7 +37,7 @@ func (f fakeWatchmanManager) Uninstall(outputDir string, cachePath string) (watc
 func TestRunWithHelp(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	exitCode := runWithManager([]string{"--help"}, fakeWatchmanManager{}, &stdout, &stderr)
+	exitCode := runWithManager([]string{"--help"}, &fakeWatchmanManager{}, &stdout, &stderr)
 	if exitCode != 0 {
 		t.Fatalf("expected exit code 0 for --help, got %d", exitCode)
 	}
@@ -42,7 +46,7 @@ func TestRunWithHelp(t *testing.T) {
 func TestRunRequiresOutputDir(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	exitCode := runWithManager([]string{}, fakeWatchmanManager{}, &stdout, &stderr)
+	exitCode := runWithManager([]string{}, &fakeWatchmanManager{}, &stdout, &stderr)
 	if exitCode != 2 {
 		t.Fatalf("expected exit code 2 when missing output dir, got %d", exitCode)
 	}
@@ -51,7 +55,7 @@ func TestRunRequiresOutputDir(t *testing.T) {
 func TestTopLevelHelpMentionsWatchmanCommands(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	exitCode := runWithManager([]string{"--help"}, fakeWatchmanManager{}, &stdout, &stderr)
+	exitCode := runWithManager([]string{"--help"}, &fakeWatchmanManager{}, &stdout, &stderr)
 	if exitCode != 0 {
 		t.Fatalf("expected exit code 0 for --help, got %d", exitCode)
 	}
@@ -63,7 +67,7 @@ func TestTopLevelHelpMentionsWatchmanCommands(t *testing.T) {
 func TestWatchmanInstallRequiresOutputDir(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	exitCode := runWithManager([]string{"watchman", "install"}, fakeWatchmanManager{}, &stdout, &stderr)
+	exitCode := runWithManager([]string{"watchman", "install"}, &fakeWatchmanManager{}, &stdout, &stderr)
 	if exitCode != 2 {
 		t.Fatalf("expected exit code 2 when watchman install has no output dir, got %d", exitCode)
 	}
@@ -72,7 +76,7 @@ func TestWatchmanInstallRequiresOutputDir(t *testing.T) {
 func TestWatchmanUninstallRequiresOutputDir(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	exitCode := runWithManager([]string{"watchman", "uninstall"}, fakeWatchmanManager{}, &stdout, &stderr)
+	exitCode := runWithManager([]string{"watchman", "uninstall"}, &fakeWatchmanManager{}, &stdout, &stderr)
 	if exitCode != 2 {
 		t.Fatalf("expected exit code 2 when watchman uninstall has no output dir, got %d", exitCode)
 	}
@@ -81,7 +85,7 @@ func TestWatchmanUninstallRequiresOutputDir(t *testing.T) {
 func TestWatchmanMissingDependencyGivesActionableMessage(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
-	manager := fakeWatchmanManager{
+	manager := &fakeWatchmanManager{
 		installErr: &watchman.DependencyError{Binary: "watchman", Err: exec.ErrNotFound},
 	}
 	exitCode := runWithManager([]string{"watchman", "install", "./notes"}, manager, &stdout, &stderr)
@@ -90,5 +94,22 @@ func TestWatchmanMissingDependencyGivesActionableMessage(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "brew install watchman") {
 		t.Fatalf("expected actionable install guidance, got:\n%s", stderr.String())
+	}
+}
+
+func TestWatchmanInstallWithoutOverrideUsesDynamicCacheResolution(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	manager := &fakeWatchmanManager{}
+
+	exitCode := runWithManager([]string{"watchman", "install", "./notes"}, manager, &stdout, &stderr)
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d with stderr:\n%s", exitCode, stderr.String())
+	}
+	if manager.lastInstall.CachePath != "" {
+		t.Fatalf("expected watchman install to avoid pinning default cache path, got %q", manager.lastInstall.CachePath)
+	}
+	if !strings.HasSuffix(manager.lastInstall.WatchRoot, "/Granola") {
+		t.Fatalf("expected watch root to target Granola config dir, got %q", manager.lastInstall.WatchRoot)
 	}
 }

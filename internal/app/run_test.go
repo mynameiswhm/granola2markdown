@@ -3,14 +3,15 @@ package app
 import (
 	"os"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"testing"
 
 	"github.com/mynameiswhm/granola2markdown/internal/export"
 )
 
 func TestFixtureExportThenIdempotentRerun(t *testing.T) {
-	root := findRepoRoot(t)
-	cachePath := filepath.Join(root, "cache-v3.json")
+	cachePath := findFixtureCachePath(t)
 	outputDir := t.TempDir()
 
 	first, err := RunExport(outputDir, cachePath, false)
@@ -64,18 +65,29 @@ func TestFixtureExportThenIdempotentRerun(t *testing.T) {
 
 func findRepoRoot(t *testing.T) string {
 	t.Helper()
-	cwd, err := os.Getwd()
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatalf("runtime.Caller failed")
+	}
+	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
+}
+
+func findFixtureCachePath(t *testing.T) string {
+	t.Helper()
+	root := findRepoRoot(t)
+	matches, err := filepath.Glob(filepath.Join(root, "cache-v*.json"))
 	if err != nil {
-		t.Fatalf("os.Getwd failed: %v", err)
+		t.Fatalf("cache fixture glob failed: %v", err)
 	}
-	for {
-		if _, err := os.Stat(filepath.Join(cwd, "cache-v3.json")); err == nil {
-			return cwd
+	if len(matches) == 0 {
+		matches, err = filepath.Glob(filepath.Join(root, "cache-v*-pretty*.json"))
+		if err != nil {
+			t.Fatalf("cache fixture glob failed: %v", err)
 		}
-		next := filepath.Dir(cwd)
-		if next == cwd {
-			t.Fatalf("could not locate repository root from %s", cwd)
-		}
-		cwd = next
 	}
+	if len(matches) == 0 {
+		t.Fatalf("could not locate a cache fixture under %s", root)
+	}
+	sort.Strings(matches)
+	return matches[0]
 }

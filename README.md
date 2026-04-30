@@ -6,6 +6,7 @@ CLI to convert meeting notes from [Granola](https://www.granola.ai/) to Markdown
 
 Make sure that [Homebrew](https://brew.sh/) is installed. Then make sure that Go is installed:
 ```shell
+brew update
 brew install go
 ```
 
@@ -48,14 +49,18 @@ granola2markdown watchman uninstall $HOME/notes/meetings
 
 Optional: if your cache file is not in the default Granola location, pass `--cache-path`:
 ```shell
-granola2markdown watchman install --cache-path /path/to/cache-v3.json $HOME/notes/meetings
-granola2markdown watchman uninstall --cache-path /path/to/cache-v3.json $HOME/notes/meetings
+granola2markdown watchman install --cache-path /path/to/cache-v6.json $HOME/notes/meetings
+granola2markdown watchman uninstall --cache-path /path/to/cache-v6.json $HOME/notes/meetings
 ```
+
+By default, the CLI scans the Granola config directory, picks the newest available `cache-v*.json`, and falls back to the current known filename (`cache-v6.json`) when none exists yet. This lets the exporter pick up future cache version bumps such as `cache-v7.json` without a code change, as long as the payload shape remains compatible.
+
+The supported export flow is cache/editor-backed only. No local config or key setup is required.
 
 Manual fallback (equivalent Watchman commands):
 ```shell
 watchman watch-project $HOME/Library/Application\ Support/Granola/
-watchman -j <<< '["trigger", "'$HOME/Library/Application\ Support/Granola/'", {"name":"cache", "expression": ["match", "cache-v3.json", "wholename"], "command": ["granola2markdown", "'$HOME/notes/meetings'"], "append_files": false}]'
+watchman -j <<< '["trigger", "'$HOME/Library/Application\ Support/Granola/'", {"name":"cache", "expression": ["match", "cache-v*.json", "wholename"], "command": ["granola2markdown", "'$HOME/notes/meetings'"], "append_files": false}]'
 ```
 
 ```

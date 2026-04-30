@@ -57,10 +57,9 @@ func BuildCandidates(state map[string]any) ([]model.NoteCandidate, error) {
 		return nil, newLoadError("state.documents is missing or invalid")
 	}
 
-	documentPanels, ok := lookupMap(state, "documentPanels", "document_panels", "DocumentPanels", "panels")
-	if !ok {
-		return nil, newLoadError("state.documentPanels is missing or invalid")
-	}
+	documentPanels, hasDocumentPanels := lookupMap(state, "documentPanels", "document_panels", "DocumentPanels", "panels")
+	transcripts, _ := lookupMap(state, "transcripts", "Transcripts")
+	activeEditor := activeEditorState(state)
 
 	candidates := make([]model.NoteCandidate, 0, len(documents))
 	for documentID, rawDoc := range documents {
@@ -72,26 +71,45 @@ func BuildCandidates(state map[string]any) ([]model.NoteCandidate, error) {
 			continue
 		}
 
-		docPanelsRaw, ok := documentPanels[documentID]
-		if !ok {
-			altID := toString(doc["id"])
-			if altID != "" {
-				docPanelsRaw = documentPanels[altID]
+		if hasDocumentPanels {
+			docPanelsRaw, ok := documentPanels[documentID]
+			if !ok {
+				altID := toString(doc["id"])
+				if altID != "" {
+					docPanelsRaw = documentPanels[altID]
+				}
+			}
+
+			docPanels, ok := toMap(docPanelsRaw)
+			if ok {
+				nonDeletedPanels := parseNonDeletedPanels(documentID, docPanels)
+				if len(nonDeletedPanels) > 0 {
+					selected := SelectPrimaryPanel(nonDeletedPanels)
+					if selected != nil {
+						candidate := model.NoteCandidate{
+							Document: model.DocumentData{
+								ID:        documentID,
+								CreatedAt: firstNonEmpty(toString(doc["created_at"]), toString(doc["createdAt"])),
+								DeletedAt: firstNonEmpty(toString(doc["deleted_at"]), toString(doc["deletedAt"])),
+								Title:     firstNonEmpty(toString(doc["title"]), toString(doc["name"])),
+							},
+							Panel:    *selected,
+							Strategy: "cache",
+						}
+						candidates = append(candidates, candidate)
+						continue
+					}
+				}
 			}
 		}
 
-		docPanels, ok := toMap(docPanelsRaw)
-		if !ok {
-			continue
-		}
-
-		nonDeletedPanels := parseNonDeletedPanels(documentID, docPanels)
-		if len(nonDeletedPanels) == 0 {
-			continue
-		}
-
-		selected := SelectPrimaryPanel(nonDeletedPanels)
-		if selected == nil {
+		synthesized := synthesizePanelFromDocument(
+			documentID,
+			doc,
+			transcriptLinesForDocument(transcripts, documentID, toString(doc["id"])),
+			activeEditor.markdownForDocument(documentID, toString(doc["id"])),
+		)
+		if synthesized == nil {
 			continue
 		}
 
@@ -100,8 +118,10 @@ func BuildCandidates(state map[string]any) ([]model.NoteCandidate, error) {
 				ID:        documentID,
 				CreatedAt: firstNonEmpty(toString(doc["created_at"]), toString(doc["createdAt"])),
 				DeletedAt: firstNonEmpty(toString(doc["deleted_at"]), toString(doc["deletedAt"])),
+				Title:     firstNonEmpty(toString(doc["title"]), toString(doc["name"])),
 			},
-			Panel: *selected,
+			Panel:    *synthesized,
+			Strategy: "cache",
 		}
 		candidates = append(candidates, candidate)
 	}
@@ -116,6 +136,139 @@ func BuildCandidates(state map[string]any) ([]model.NoteCandidate, error) {
 	})
 
 	return candidates, nil
+}
+
+func synthesizePanelFromDocument(documentID string, doc map[string]any, transcriptLines []map[string]any, activeMarkdown string) *model.PanelData {
+	content := firstNonNilMap(doc["summary"], doc["overview"], doc["notes"], doc["content"])
+	if !hasStructuredText(content) {
+		content = nil
+	}
+
+	notesMarkdown := firstNonEmpty(toString(doc["notes_markdown"]), toString(doc["notesMarkdown"]))
+	notesPlain := firstNonEmpty(toString(doc["notes_plain"]), toString(doc["notesPlain"]))
+	markdownContent := firstNonEmpty(activeMarkdown, notesMarkdown)
+
+	originalContent := firstNonEmpty(
+		toString(doc["summary_html"]),
+		toString(doc["overview_html"]),
+		toString(doc["notes_html"]),
+		toString(doc["original_content"]),
+		notesPlain,
+	)
+	generatedLines := append([]map[string]any{}, toSliceOfMaps(doc["generated_lines"])...)
+	generatedLines = append(generatedLines, transcriptLines...)
+	if len(generatedLines) == 0 {
+		generatedLines = append(generatedLines, textToGeneratedLines(firstNonEmpty(notesPlain, markdownContent))...)
+	}
+
+	if content == nil && strings.TrimSpace(markdownContent) == "" && strings.TrimSpace(originalContent) == "" && len(generatedLines) == 0 {
+		return nil
+	}
+
+	panel := model.PanelData{
+		ID:               firstNonEmpty(toString(doc["summary_id"]), toString(doc["id"])+"-document"),
+		DocumentID:       firstNonEmpty(toString(doc["id"]), documentID),
+		Title:            firstNonEmpty(toString(doc["title"]), "Summary"),
+		TemplateSlug:     firstNonEmpty(toString(doc["template_slug"]), "document-summary"),
+		Markdown:         markdownContent,
+		Content:          content,
+		OriginalContent:  originalContent,
+		GeneratedLines:   generatedLines,
+		CreatedAt:        firstNonEmpty(toString(doc["created_at"]), toString(doc["createdAt"])),
+		ContentUpdatedAt: firstNonEmpty(toString(doc["updated_at"]), toString(doc["updatedAt"]), toString(doc["created_at"]), toString(doc["createdAt"])),
+		DeletedAt:        firstNonEmpty(toString(doc["deleted_at"]), toString(doc["deletedAt"])),
+	}
+	return &panel
+}
+
+func transcriptLinesForDocument(transcripts map[string]any, candidateIDs ...string) []map[string]any {
+	if len(transcripts) == 0 {
+		return nil
+	}
+
+	for _, candidateID := range candidateIDs {
+		id := strings.TrimSpace(candidateID)
+		if id == "" {
+			continue
+		}
+
+		raw := transcripts[id]
+		items := toSliceOfMaps(raw)
+		if len(items) == 0 {
+			continue
+		}
+
+		lines := make([]map[string]any, 0, len(items))
+		for _, item := range items {
+			text := strings.TrimSpace(toString(item["text"]))
+			if text == "" {
+				continue
+			}
+			lines = append(lines, map[string]any{"text": text})
+		}
+		if len(lines) > 0 {
+			return lines
+		}
+	}
+
+	return nil
+}
+
+func textToGeneratedLines(text string) []map[string]any {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return nil
+	}
+
+	lines := strings.Split(trimmed, "\n")
+	result := make([]map[string]any, 0, len(lines))
+	for _, line := range lines {
+		value := strings.TrimSpace(line)
+		if value == "" {
+			continue
+		}
+		result = append(result, map[string]any{"text": value})
+	}
+	return result
+}
+
+func hasStructuredText(content map[string]any) bool {
+	if content == nil {
+		return false
+	}
+	return hasStructuredTextAny(content)
+}
+
+func hasStructuredTextAny(value any) bool {
+	switch typed := value.(type) {
+	case map[string]any:
+		if strings.TrimSpace(toString(typed["text"])) != "" {
+			return true
+		}
+		if hasStructuredTextAny(typed["content"]) {
+			return true
+		}
+		if hasStructuredTextAny(typed["children"]) {
+			return true
+		}
+		return false
+	case []any:
+		for _, item := range typed {
+			if hasStructuredTextAny(item) {
+				return true
+			}
+		}
+		return false
+	case []map[string]any:
+		for _, item := range typed {
+			if hasStructuredTextAny(item) {
+				return true
+			}
+		}
+		return false
+	default:
+		return false
+	}
 }
 
 func SelectPrimaryPanel(panels []model.PanelData) *model.PanelData {
@@ -215,6 +368,15 @@ func toMapOrNil(value any) map[string]any {
 	return nil
 }
 
+func firstNonNilMap(values ...any) map[string]any {
+	for _, value := range values {
+		if mapped, ok := toMap(value); ok {
+			return mapped
+		}
+	}
+	return nil
+}
+
 func toSliceOfMaps(value any) []map[string]any {
 	items, ok := value.([]any)
 	if !ok {
@@ -249,6 +411,41 @@ func firstNonEmpty(values ...string) string {
 		trimmed := strings.TrimSpace(value)
 		if trimmed != "" {
 			return trimmed
+		}
+	}
+	return ""
+}
+
+type activeEditorDocumentState struct {
+	meetingID string
+	markdown  string
+}
+
+func activeEditorState(state map[string]any) activeEditorDocumentState {
+	multiChatState, ok := lookupMap(state, "multiChatState")
+	if !ok {
+		return activeEditorDocumentState{}
+	}
+
+	chatContext, ok := lookupMap(multiChatState, "chatContext")
+	if !ok {
+		return activeEditorDocumentState{}
+	}
+
+	return activeEditorDocumentState{
+		meetingID: strings.TrimSpace(toString(chatContext["meetingId"])),
+		markdown:  strings.TrimSpace(toString(chatContext["activeEditorMarkdown"])),
+	}
+}
+
+func (s activeEditorDocumentState) markdownForDocument(candidateIDs ...string) string {
+	if s.meetingID == "" || s.markdown == "" {
+		return ""
+	}
+
+	for _, candidateID := range candidateIDs {
+		if strings.TrimSpace(candidateID) == s.meetingID {
+			return s.markdown
 		}
 	}
 	return ""
