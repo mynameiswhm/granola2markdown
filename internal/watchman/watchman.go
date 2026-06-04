@@ -280,9 +280,27 @@ func buildInstallPayload(triggerName string, watchRoot string, outputDir string,
 
 func buildCacheMatchExpression(cachePath string) []any {
 	if strings.TrimSpace(cachePath) == "" {
-		return []any{"match", "cache-v*.json", "wholename"}
+		return []any{
+			"anyof",
+			[]any{"match", "cache-v*.json", "wholename"},
+			[]any{"match", "cache-v*.json.enc", "wholename"},
+		}
 	}
-	return []any{"match", filepath.Base(cachePath), "wholename"}
+
+	baseName := filepath.Base(cachePath)
+	if strings.HasSuffix(baseName, ".enc") {
+		return []any{
+			"anyof",
+			[]any{"match", baseName, "wholename"},
+			[]any{"match", strings.TrimSuffix(baseName, ".enc"), "wholename"},
+		}
+	}
+
+	return []any{
+		"anyof",
+		[]any{"match", baseName, "wholename"},
+		[]any{"match", baseName + ".enc", "wholename"},
+	}
 }
 
 func missingTriggerError(stdout string, stderr string, err error) bool {

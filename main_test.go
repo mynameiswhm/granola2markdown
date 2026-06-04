@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os/exec"
 	"strings"
 	"testing"
@@ -59,8 +60,12 @@ func TestTopLevelHelpMentionsWatchmanCommands(t *testing.T) {
 	if exitCode != 0 {
 		t.Fatalf("expected exit code 0 for --help, got %d", exitCode)
 	}
-	if !strings.Contains(stderr.String(), "watchman <install|uninstall>") {
-		t.Fatalf("expected help to mention watchman subcommands, got:\n%s", stderr.String())
+	help := stderr.String()
+	if !strings.Contains(help, "watchman <install|uninstall>") {
+		t.Fatalf("expected help to mention watchman subcommands, got:\n%s", help)
+	}
+	if !strings.Contains(help, "decrypt-cache") {
+		t.Fatalf("expected help to mention decrypt-cache subcommand, got:\n%s", help)
 	}
 }
 
@@ -111,5 +116,66 @@ func TestWatchmanInstallWithoutOverrideUsesDynamicCacheResolution(t *testing.T) 
 	}
 	if !strings.HasSuffix(manager.lastInstall.WatchRoot, "/Granola") {
 		t.Fatalf("expected watch root to target Granola config dir, got %q", manager.lastInstall.WatchRoot)
+	}
+}
+
+func TestDecryptCacheRequiresOutputFile(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithManager([]string{"decrypt-cache"}, &fakeWatchmanManager{}, &stdout, &stderr)
+	if exitCode != 2 {
+		t.Fatalf("expected exit code 2 when decrypt-cache has no output file, got %d", exitCode)
+	}
+}
+
+func TestDecryptCacheWritesRequestedOutput(t *testing.T) {
+	previous := dumpDecryptedCacheFunc
+	defer func() {
+		dumpDecryptedCacheFunc = previous
+	}()
+
+	var gotCachePath string
+	var gotOutputPath string
+	dumpDecryptedCacheFunc = func(cachePath string, outputPath string) error {
+		gotCachePath = cachePath
+		gotOutputPath = outputPath
+		return nil
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithManager([]string{"decrypt-cache", "/tmp/decrypted-cache.json"}, &fakeWatchmanManager{}, &stdout, &stderr)
+	if exitCode != 0 {
+		t.Fatalf("expected exit code 0, got %d with stderr:\n%s", exitCode, stderr.String())
+	}
+	if gotOutputPath != "/tmp/decrypted-cache.json" {
+		t.Fatalf("unexpected output path: got %q", gotOutputPath)
+	}
+	if !strings.HasSuffix(gotCachePath, "/Granola/cache-v6.json") {
+		t.Fatalf("unexpected cache path resolution: got %q", gotCachePath)
+	}
+	if !strings.Contains(stdout.String(), "Decrypted cache written.") {
+		t.Fatalf("expected success message, got:\n%s", stdout.String())
+	}
+}
+
+func TestDecryptCacheReportsFailure(t *testing.T) {
+	previous := dumpDecryptedCacheFunc
+	defer func() {
+		dumpDecryptedCacheFunc = previous
+	}()
+
+	dumpDecryptedCacheFunc = func(cachePath string, outputPath string) error {
+		return errors.New("decryption failed")
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := runWithManager([]string{"decrypt-cache", "/tmp/decrypted-cache.json"}, &fakeWatchmanManager{}, &stdout, &stderr)
+	if exitCode != 1 {
+		t.Fatalf("expected exit code 1, got %d", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "decryption failed") {
+		t.Fatalf("expected decrypt-cache error output, got:\n%s", stderr.String())
 	}
 }

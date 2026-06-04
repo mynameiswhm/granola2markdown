@@ -28,9 +28,16 @@ type watchmanManager interface {
 	Uninstall(options watchman.UninstallOptions) (watchman.UninstallResult, error)
 }
 
+var dumpDecryptedCacheFunc = cache.DumpDecryptedCache
+
 func runWithManager(args []string, manager watchmanManager, stdout io.Writer, stderr io.Writer) int {
-	if len(args) > 0 && args[0] == "watchman" {
-		return runWatchman(args[1:], manager, stdout, stderr)
+	if len(args) > 0 {
+		switch args[0] {
+		case "watchman":
+			return runWatchman(args[1:], manager, stdout, stderr)
+		case "decrypt-cache":
+			return runDecryptCache(args[1:], stdout, stderr)
+		}
 	}
 	return runExport(args, stdout, stderr)
 }
@@ -44,7 +51,9 @@ func runExport(args []string, stdout io.Writer, stderr io.Writer) int {
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "Usage: %s [--cache-path PATH] [--verbose] <output_dir>\n", fs.Name())
 		fmt.Fprintf(fs.Output(), "       %s watchman <install|uninstall> [--cache-path PATH] <output_dir>\n", fs.Name())
+		fmt.Fprintf(fs.Output(), "       %s decrypt-cache [--cache-path PATH] <output_file>\n", fs.Name())
 		fmt.Fprintln(fs.Output(), "Export Granola meeting notes from Granola cache files, preferring the newest cache-v*.json.")
+		fmt.Fprintln(fs.Output(), "Decrypt the Granola encrypted cache and write the raw JSON to a file.")
 		fmt.Fprintln(fs.Output(), "Manage Watchman triggers for background note export.")
 		fs.PrintDefaults()
 	}
@@ -121,6 +130,45 @@ func runWatchman(args []string, manager watchmanManager, stdout io.Writer, stder
 		fs.Usage()
 		return 2
 	}
+}
+
+func runDecryptCache(args []string, stdout io.Writer, stderr io.Writer) int {
+	fs := flag.NewFlagSet("granola2markdown decrypt-cache", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	cachePathFlag := fs.String("cache-path", "", "Override path to Granola cache file (otherwise probe newest cache-v*.json)")
+	fs.Usage = func() {
+		fmt.Fprintln(fs.Output(), "Usage: granola2markdown decrypt-cache [--cache-path PATH] <output_file>")
+		fs.PrintDefaults()
+	}
+
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 2
+	}
+
+	positional := fs.Args()
+	if len(positional) != 1 {
+		fs.Usage()
+		return 2
+	}
+
+	cachePath, err := paths.ResolveCachePath(*cachePathFlag)
+	if err != nil {
+		fmt.Fprintf(stderr, "Fatal: cannot determine cache path: %v\n", err)
+		return 1
+	}
+
+	if err := dumpDecryptedCacheFunc(cachePath, positional[0]); err != nil {
+		fmt.Fprintf(stderr, "Fatal: %v\n", err)
+		return 1
+	}
+
+	fmt.Fprintln(stdout, "Decrypted cache written.")
+	fmt.Fprintf(stdout, "  source: %s\n", cachePath)
+	fmt.Fprintf(stdout, "  output: %s\n", positional[0])
+	return 0
 }
 
 func runWatchmanInstall(args []string, manager watchmanManager, stdout io.Writer, stderr io.Writer) int {

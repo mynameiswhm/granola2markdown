@@ -205,8 +205,24 @@ func assertVersionAwareExpression(t *testing.T, expression any) {
 	if len(items) != 3 {
 		t.Fatalf("unexpected expression length: got %d", len(items))
 	}
-	if items[0] != "match" || items[1] != "cache-v*.json" || items[2] != "wholename" {
+	if items[0] != "anyof" {
 		t.Fatalf("unexpected expression clause: %#v", items)
+	}
+
+	left, ok := items[1].([]any)
+	if !ok {
+		t.Fatalf("expression left clause is not an array: %#v", items[1])
+	}
+	right, ok := items[2].([]any)
+	if !ok {
+		t.Fatalf("expression right clause is not an array: %#v", items[2])
+	}
+
+	if len(left) != 3 || left[0] != "match" || left[1] != "cache-v*.json" || left[2] != "wholename" {
+		t.Fatalf("unexpected left version-aware clause: %#v", left)
+	}
+	if len(right) != 3 || right[0] != "match" || right[1] != "cache-v*.json.enc" || right[2] != "wholename" {
+		t.Fatalf("unexpected right version-aware clause: %#v", right)
 	}
 }
 
@@ -249,8 +265,22 @@ func TestInstallPinsExplicitCacheOverride(t *testing.T) {
 	if !ok {
 		t.Fatalf("expression is not an array: %#v", config["expression"])
 	}
-	if len(expression) != 3 || expression[0] != "match" || expression[1] != "cache-v7.json" || expression[2] != "wholename" {
+	if len(expression) != 3 || expression[0] != "anyof" {
 		t.Fatalf("unexpected pinned expression: %#v", expression)
+	}
+	left, ok := expression[1].([]any)
+	if !ok {
+		t.Fatalf("left pinned expression is not an array: %#v", expression[1])
+	}
+	right, ok := expression[2].([]any)
+	if !ok {
+		t.Fatalf("right pinned expression is not an array: %#v", expression[2])
+	}
+	if len(left) != 3 || left[0] != "match" || left[1] != "cache-v7.json" || left[2] != "wholename" {
+		t.Fatalf("unexpected pinned base expression: %#v", left)
+	}
+	if len(right) != 3 || right[0] != "match" || right[1] != "cache-v7.json.enc" || right[2] != "wholename" {
+		t.Fatalf("unexpected pinned encrypted expression: %#v", right)
 	}
 
 	commandRaw, ok := config["command"].([]any)
@@ -263,5 +293,64 @@ func TestInstallPinsExplicitCacheOverride(t *testing.T) {
 	}
 	if len(command) != 4 || command[0] != "granola2markdown" || command[1] != "--cache-path" || command[2] != cachePath {
 		t.Fatalf("unexpected pinned command: %#v", command)
+	}
+}
+
+func TestInstallPinsExplicitEncryptedCacheOverride(t *testing.T) {
+	var calls []call
+	manager := NewManagerWithDeps(
+		func(file string) (string, error) {
+			return "/usr/local/bin/watchman", nil
+		},
+		func(name string, args []string, stdin []byte) (string, string, error) {
+			calls = append(calls, call{
+				name:  name,
+				args:  append([]string(nil), args...),
+				stdin: append([]byte(nil), stdin...),
+			})
+			return "", "", nil
+		},
+	)
+
+	cachePath := "/tmp/granola/cache-v7.json.enc"
+	_, err := manager.Install(InstallOptions{
+		OutputDir: "./notes",
+		WatchRoot: filepath.Dir(cachePath),
+		CachePath: cachePath,
+	})
+	if err != nil {
+		t.Fatalf("Install() error = %v", err)
+	}
+
+	var payload []any
+	if err := json.Unmarshal(calls[1].stdin, &payload); err != nil {
+		t.Fatalf("invalid trigger payload JSON: %v", err)
+	}
+
+	config, ok := payload[2].(map[string]any)
+	if !ok {
+		t.Fatalf("payload[2] is not an object: %#v", payload[2])
+	}
+	expression, ok := config["expression"].([]any)
+	if !ok {
+		t.Fatalf("expression is not an array: %#v", config["expression"])
+	}
+	if len(expression) != 3 || expression[0] != "anyof" {
+		t.Fatalf("unexpected encrypted pinned expression: %#v", expression)
+	}
+
+	left, ok := expression[1].([]any)
+	if !ok {
+		t.Fatalf("left encrypted expression is not an array: %#v", expression[1])
+	}
+	right, ok := expression[2].([]any)
+	if !ok {
+		t.Fatalf("right encrypted expression is not an array: %#v", expression[2])
+	}
+	if len(left) != 3 || left[0] != "match" || left[1] != "cache-v7.json.enc" || left[2] != "wholename" {
+		t.Fatalf("unexpected encrypted override expression: %#v", left)
+	}
+	if len(right) != 3 || right[0] != "match" || right[1] != "cache-v7.json" || right[2] != "wholename" {
+		t.Fatalf("unexpected plaintext sibling expression: %#v", right)
 	}
 }

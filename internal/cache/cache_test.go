@@ -1,7 +1,12 @@
 package cache
 
 import (
+	"bytes"
+	"crypto/aes"
+	"crypto/cipher"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -13,10 +18,6 @@ func TestLoadCacheStateAndCandidates(t *testing.T) {
 	state, err := LoadCacheState(findFixtureCachePath(t))
 	if err != nil {
 		t.Fatalf("LoadCacheState failed: %v", err)
-	}
-
-	if _, ok := state["documents"]; !ok {
-		t.Fatalf("state should include documents")
 	}
 
 	candidates, err := BuildCandidates(state)
@@ -134,6 +135,222 @@ func TestInvalidSerializedCacheAcrossVersionedCacheFilesRaises(t *testing.T) {
 				t.Fatalf("expected LoadError, got %T", err)
 			}
 		})
+	}
+}
+
+func TestLoadCacheStateUsesEncryptedSiblingWhenPresent(t *testing.T) {
+	restore := stubDEKLoader(t, func(string) ([]byte, error) {
+		return bytes.Repeat([]byte{0x42}, granolaCacheEncryptionKeySize), nil
+	})
+	defer restore()
+
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache-v6.json")
+	encPath := cachePath + ".enc"
+
+	plainPayload := mustMarshalJSON(t, map[string]any{
+		"state": map[string]any{
+			"documents": map[string]any{},
+		},
+	})
+	if err := os.WriteFile(cachePath, plainPayload, 0o644); err != nil {
+		t.Fatalf("write plaintext cache failed: %v", err)
+	}
+
+	encPayload := mustMarshalJSON(t, map[string]any{
+		"state": map[string]any{
+			"documents": map[string]any{
+				"doc-1": map[string]any{
+					"id": "doc-1",
+				},
+			},
+		},
+	})
+	if err := os.WriteFile(encPath, encryptGranolaPayloadForTest(t, encPayload, bytes.Repeat([]byte{0x42}, granolaCacheEncryptionKeySize)), 0o644); err != nil {
+		t.Fatalf("write encrypted cache failed: %v", err)
+	}
+
+	state, err := LoadCacheState(cachePath)
+	if err != nil {
+		t.Fatalf("LoadCacheState failed: %v", err)
+	}
+
+	documents, ok := lookupMap(state, "documents")
+	if !ok {
+		t.Fatalf("decrypted state should include documents")
+	}
+	if _, ok := documents["doc-1"]; !ok {
+		t.Fatalf("expected decrypted encrypted cache payload to win")
+	}
+}
+
+func TestLoadCacheStateErrorsWhenEncryptedSiblingCannotBeDecrypted(t *testing.T) {
+	restore := stubDEKLoader(t, func(string) ([]byte, error) {
+		return nil, errors.New("keychain unavailable")
+	})
+	defer restore()
+
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache-v6.json")
+	encPath := cachePath + ".enc"
+
+	plainPayload := mustMarshalJSON(t, map[string]any{
+		"state": map[string]any{
+			"documents": map[string]any{
+				"doc-plain": map[string]any{
+					"id": "doc-plain",
+				},
+			},
+		},
+	})
+	if err := os.WriteFile(cachePath, plainPayload, 0o644); err != nil {
+		t.Fatalf("write plaintext cache failed: %v", err)
+	}
+	if err := os.WriteFile(encPath, []byte("not-a-real-encrypted-payload"), 0o644); err != nil {
+		t.Fatalf("write encrypted cache failed: %v", err)
+	}
+
+	_, err := LoadCacheState(cachePath)
+	if err == nil {
+		t.Fatalf("expected decryption error when encrypted sibling is present")
+	}
+}
+
+func TestLoadCacheStateErrorsWhenEncryptedStateLacksExportableNoteState(t *testing.T) {
+	restore := stubDEKLoader(t, func(string) ([]byte, error) {
+		return bytes.Repeat([]byte{0x31}, granolaCacheEncryptionKeySize), nil
+	})
+	defer restore()
+
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache-v6.json")
+	encPath := cachePath + ".enc"
+
+	plainPayload := mustMarshalJSON(t, map[string]any{
+		"state": map[string]any{
+			"documents": map[string]any{
+				"doc-plain": map[string]any{"id": "doc-plain"},
+			},
+			"documentPanels": map[string]any{},
+		},
+	})
+	if err := os.WriteFile(cachePath, plainPayload, 0o644); err != nil {
+		t.Fatalf("write plaintext cache failed: %v", err)
+	}
+
+	encPayload := mustMarshalJSON(t, map[string]any{
+		"cache": map[string]any{
+			"version": 8,
+			"state": map[string]any{
+				"transcripts":    map[string]any{},
+				"multiChatState": map[string]any{},
+			},
+		},
+	})
+	if err := os.WriteFile(encPath, encryptGranolaPayloadForTest(t, encPayload, bytes.Repeat([]byte{0x31}, granolaCacheEncryptionKeySize)), 0o644); err != nil {
+		t.Fatalf("write encrypted cache failed: %v", err)
+	}
+
+	_, err := LoadCacheState(cachePath)
+	if err == nil {
+		t.Fatalf("expected error when encrypted payload has no exportable note state")
+	}
+}
+
+func TestLoadCacheStateDecryptsExplicitEncryptedPath(t *testing.T) {
+	restore := stubDEKLoader(t, func(string) ([]byte, error) {
+		return bytes.Repeat([]byte{0x24}, granolaCacheEncryptionKeySize), nil
+	})
+	defer restore()
+
+	dir := t.TempDir()
+	encPath := filepath.Join(dir, "cache-v6.json.enc")
+	payload := mustMarshalJSON(t, map[string]any{
+		"cache": map[string]any{
+			"version": 8,
+			"state": map[string]any{
+				"transcripts": map[string]any{
+					"doc-explicit": []any{
+						map[string]any{
+							"text":            "hello world",
+							"start_timestamp": "2026-06-02T17:00:50.965Z",
+							"end_timestamp":   "2026-06-02T17:00:55.935Z",
+						},
+					},
+				},
+			},
+		},
+	})
+	if err := os.WriteFile(encPath, encryptGranolaPayloadForTest(t, payload, bytes.Repeat([]byte{0x24}, granolaCacheEncryptionKeySize)), 0o644); err != nil {
+		t.Fatalf("write encrypted cache failed: %v", err)
+	}
+
+	state, err := LoadCacheState(encPath)
+	if err != nil {
+		t.Fatalf("LoadCacheState failed: %v", err)
+	}
+
+	transcripts, ok := lookupMap(state, "transcripts")
+	if !ok {
+		t.Fatalf("decrypted state should include transcripts")
+	}
+	if _, ok := transcripts["doc-explicit"]; !ok {
+		t.Fatalf("expected explicit encrypted cache path to be decrypted")
+	}
+}
+
+func TestDecryptSafeStorageBlobWithPassword(t *testing.T) {
+	password := "test-safe-storage-password"
+	dek := bytes.Repeat([]byte{0x7a}, granolaCacheEncryptionKeySize)
+	base64DEK := []byte(base64.StdEncoding.EncodeToString(dek))
+
+	blob := encryptSafeStorageBlobForTest(t, base64DEK, password)
+	got, err := decryptSafeStorageBlobWithPassword(blob, password)
+	if err != nil {
+		t.Fatalf("decryptSafeStorageBlobWithPassword failed: %v", err)
+	}
+	if !bytes.Equal(got, base64DEK) {
+		t.Fatalf("safeStorage plaintext mismatch: got %q want %q", got, base64DEK)
+	}
+}
+
+func TestDumpDecryptedCacheWritesRawJSON(t *testing.T) {
+	restoreLoader := stubDEKLoader(t, func(string) ([]byte, error) {
+		return bytes.Repeat([]byte{0x51}, granolaCacheEncryptionKeySize), nil
+	})
+	defer restoreLoader()
+
+	dir := t.TempDir()
+	cachePath := filepath.Join(dir, "cache-v6.json")
+	encPath := cachePath + ".enc"
+	outputPath := filepath.Join(dir, "dump", "cache.json")
+
+	payload := mustMarshalJSON(t, map[string]any{
+		"cache": map[string]any{
+			"version": 8,
+			"state": map[string]any{
+				"transcripts": map[string]any{
+					"doc-1": []any{
+						map[string]any{"text": "hello"},
+					},
+				},
+			},
+		},
+	})
+	if err := os.WriteFile(encPath, encryptGranolaPayloadForTest(t, payload, bytes.Repeat([]byte{0x51}, granolaCacheEncryptionKeySize)), 0o644); err != nil {
+		t.Fatalf("write encrypted cache failed: %v", err)
+	}
+
+	if err := DumpDecryptedCache(cachePath, outputPath); err != nil {
+		t.Fatalf("DumpDecryptedCache failed: %v", err)
+	}
+
+	got, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("read output failed: %v", err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("dumped payload mismatch: got %q want %q", got, payload)
 	}
 }
 
@@ -292,6 +509,55 @@ func TestBuildCandidatesUsesActiveEditorMarkdownForMatchingMeeting(t *testing.T)
 	}
 	if got := candidates[0].Panel.GeneratedLines[0]["text"]; got != "transcript fallback" {
 		t.Fatalf("expected transcript fallback to remain available, got %v", got)
+	}
+}
+
+func TestBuildCandidatesUsesActiveEditorMarkdownWithoutDocuments(t *testing.T) {
+	state := map[string]any{
+		"transcripts": map[string]any{
+			"doc-1": []any{
+				map[string]any{
+					"text":            "transcript fallback",
+					"start_timestamp": "2026-06-02T17:00:50.965Z",
+					"end_timestamp":   "2026-06-02T17:00:55.935Z",
+				},
+			},
+		},
+		"multiChatState": map[string]any{
+			"documentIds": []any{"doc-1"},
+			"chatContext": map[string]any{
+				"meetingId":            "doc-1",
+				"activeEditorMarkdown": "### Rich summary\n\n- action item",
+				"summaryPanelId":       "panel-1",
+				"summaryPanelSlug":     "meeting-summary-consolidated",
+			},
+		},
+	}
+
+	candidates, err := BuildCandidates(state)
+	if err != nil {
+		t.Fatalf("BuildCandidates failed: %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("expected 1 candidate, got %d", len(candidates))
+	}
+	if candidates[0].Document.ID != "doc-1" {
+		t.Fatalf("unexpected document id: %q", candidates[0].Document.ID)
+	}
+	if candidates[0].Document.Title != "Rich summary" {
+		t.Fatalf("unexpected document title: %q", candidates[0].Document.Title)
+	}
+	if candidates[0].Document.CreatedAt != "2026-06-02T17:00:50.965Z" {
+		t.Fatalf("unexpected created_at: %q", candidates[0].Document.CreatedAt)
+	}
+	if candidates[0].Panel.ID != "panel-1" {
+		t.Fatalf("unexpected panel id: %q", candidates[0].Panel.ID)
+	}
+	if candidates[0].Panel.ContentUpdatedAt != "2026-06-02T17:00:55.935Z" {
+		t.Fatalf("unexpected content_updated_at: %q", candidates[0].Panel.ContentUpdatedAt)
+	}
+	if got := candidates[0].Panel.Markdown; got != "### Rich summary\n\n- action item" {
+		t.Fatalf("unexpected panel markdown: %q", got)
 	}
 }
 
@@ -459,4 +725,67 @@ func unwrap(err error) error {
 		return w.Unwrap()
 	}
 	return nil
+}
+
+func mustMarshalJSON(t *testing.T, payload any) []byte {
+	t.Helper()
+	data, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	return data
+}
+
+func stubDEKLoader(t *testing.T, fn func(string) ([]byte, error)) func() {
+	t.Helper()
+	previous := loadDEKForCachePathFunc
+	loadDEKForCachePathFunc = fn
+	return func() {
+		loadDEKForCachePathFunc = previous
+	}
+}
+
+func encryptGranolaPayloadForTest(t *testing.T, plaintext []byte, dek []byte) []byte {
+	t.Helper()
+
+	block, err := aes.NewCipher(dek)
+	if err != nil {
+		t.Fatalf("aes.NewCipher failed: %v", err)
+	}
+	gcm, err := cipher.NewGCMWithTagSize(block, granolaCacheGCMTagSize)
+	if err != nil {
+		t.Fatalf("cipher.NewGCMWithTagSize failed: %v", err)
+	}
+
+	nonce := bytes.Repeat([]byte{0x09}, granolaCacheGCMNonceSize)
+	sealed := gcm.Seal(nil, nonce, plaintext, nil)
+	ciphertext := sealed[:len(sealed)-granolaCacheGCMTagSize]
+	tag := sealed[len(sealed)-granolaCacheGCMTagSize:]
+
+	payload := make([]byte, 0, len(nonce)+len(ciphertext)+len(tag))
+	payload = append(payload, nonce...)
+	payload = append(payload, ciphertext...)
+	payload = append(payload, tag...)
+	return payload
+}
+
+func encryptSafeStorageBlobForTest(t *testing.T, plaintext []byte, password string) []byte {
+	t.Helper()
+
+	key := pbkdf2SHA1([]byte(password), []byte("saltysalt"), safeStoragePBKDF2Iterations, safeStorageDerivedKeyLength)
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		t.Fatalf("aes.NewCipher failed: %v", err)
+	}
+
+	padLen := aes.BlockSize - (len(plaintext) % aes.BlockSize)
+	padded := append([]byte(nil), plaintext...)
+	padded = append(padded, bytes.Repeat([]byte{byte(padLen)}, padLen)...)
+
+	iv := bytes.Repeat([]byte(" "), aes.BlockSize)
+	ciphertext := make([]byte, len(padded))
+	cipher.NewCBCEncrypter(block, iv).CryptBlocks(ciphertext, padded)
+
+	payload := append([]byte(safeStoragePrefix), ciphertext...)
+	return payload
 }
